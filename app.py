@@ -1,11 +1,15 @@
-import streamlit as st
+import base64
 import json
+import os
 import re
+from io import BytesIO
+
+import streamlit as st
+from openai import OpenAI, OpenAIError
 from PIL import Image
 from pypdf import PdfReader
 from falkordb import FalkorDB
 from streamlit_agraph import agraph, Node, Edge, Config
-from google import genai
 
 # --- PAGE CONFIGURATION (WIDE MATRIX LAYOUT) ---
 st.set_page_config(
@@ -14,6 +18,58 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="collapsed"
 )
+
+try:
+    xai_api_key = os.getenv("XAI_API_KEY") or st.secrets.get("XAI_API_KEY", "")
+except FileNotFoundError:
+    xai_api_key = os.getenv("XAI_API_KEY", "")
+
+SAMPLE_CASES = {
+    "Case_Homicde_Sector4": {
+        "suspect": "Jordan",
+        "evidence_text": """
+        [LOG_ENTRY_1029: CCTV Sector 4 East Gate]
+        Timestamp: 2026-10-18 21:15:42
+        Subject identified as Jordan entering Sector 4 warehouse wearing a dark hoodie.
+        Thermal signature indicates movement near the secondary loading bay.
+
+        [TRANSCRIPT_INTERROGATION_JORDAN]
+        Detective: "Where were you between 9:00 PM and 10:00 PM?"
+        Jordan: "I was entirely across town at the diner on 5th Street with my friend Alex. I never went near Sector 4."
+        Detective: "We have footage placing your vehicle on Highway 9 heading north toward Sector 4 at 21:05."
+        Jordan: "That... that wasn't me driving, someone must have cloned my plates."
+
+        [PHONE_ARCHIVE_EXTRACT]
+        Outgoing encrypted message from Jordan at 21:12: "The package is secured near the loading bay, torch it if anyone follows."
+        """,
+    },
+    "Case_Homicide_Sector9": {
+        "suspect": "Alex",
+        "evidence_text": """
+        [LOG_ENTRY_8842: Cyber Operations Hub Sector 9]
+        Timestamp: 2026-10-18 22:30:11
+        Access log shows manual override of the security grid using credentials assigned to Alex.
+
+        [TRANSCRIPT_INTERROGATION_ALEX]
+        Detective: "Why did your access badge trigger the firewall breach at 22:30?"
+        Alex: "I lost my badge earlier that evening at the cafeteria. Anyone could have picked it up."
+        Detective: "The override also required your personal pin code input."
+        Alex: "I write my pin on a sticky note behind my desk monitor."
+
+        [FINANCIAL_LEDGER_EXTRACT]
+        Wire transfer of 50,000 credits deposited into Alex's offshore account 10 minutes prior to the firewall breach.
+        """,
+    },
+}
+
+
+def load_sample_case() -> None:
+    sample_name = st.session_state.get("sample_case_select")
+    if sample_name in SAMPLE_CASES:
+        sample_case = SAMPLE_CASES[sample_name]
+        st.session_state["sample_evidence_text"] = sample_case["evidence_text"].strip()
+        st.session_state["suspect_name"] = sample_case["suspect"]
+
 
 # --- NAVIGATION STATE ROUTING & PERSISTENCE ---
 if "in_dashboard" not in st.session_state:
@@ -30,8 +86,6 @@ if "f_pass" not in st.session_state:
     st.session_state.f_pass = ""
 if "case_id" not in st.session_state:
     st.session_state.case_id = "Case_Homicide_Sector4"
-if "api_key" not in st.session_state:
-    st.session_state.api_key = ""
 if "new_rule" not in st.session_state:
     st.session_state.new_rule = "Confront suspects immediately with photographic and digital evidence."
 if "suspect_name" not in st.session_state:
@@ -894,7 +948,11 @@ with st.expander("⚙️ UPLINK CONFIGURATION & CASE WORKSPACE CONTROLS", expand
             key="case_id"
         )
         safe_case_id = re.sub(r'[^a-zA-Z0-9_-]', '_', raw_case_input.strip()) if raw_case_input.strip() else "Case_Workspace"
-        api_key = st.text_input("AI Studio API Key:", type="password", value=st.secrets.get("GEMINI_API_KEY", st.session_state.get("api_key", "")), placeholder="Enter AI Studio API Key", key="api_key")
+        st.caption(
+            "xAI API key configured."
+            if xai_api_key
+            else "Set XAI_API_KEY in the environment or Streamlit secrets."
+        )
 
     with ctrl_col4:
         st.markdown('<div style="font-size:0.8rem; font-weight:700; color:var(--accent-teal); margin-bottom:4px;">🧠 PROCEDURAL MEMORY</div>', unsafe_allow_html=True)
@@ -1021,12 +1079,14 @@ def process_uploaded_evidence(uploaded_file):
         return text, "text"
 
 # --- AGENT 1: MULTI-MODAL PROFILER ---
-def run_agent_1_profiler(suspect_name, evidence_data, ev_type, gemini_key):
-    if not gemini_key:
-        return [
-            {"topic": "LOCATION_ALIBI", "claim": "Suspect claimed to be at home, but visual evidence shows otherwise.", "reference": "Evidence File"}
-        ]
-    client = genai.Client(api_key=gemini_key)
+def run_agent_1_profiler(suspect_name, evidence_data, ev_type, xai_key):
+    if not xai_key:
+        raise ValueError("Configure XAI_API_KEY before analyzing evidence.")
+
+    client = OpenAI(
+        api_key=xai_key,
+        base_url="https://api.x.ai/v1",
+    )
     
     prompt = f"""
     You are Agent 1 (Multi-Modal Evidence Profiler). Analyze this evidence file provided for suspect '{suspect_name}'. 
@@ -1038,17 +1098,32 @@ def run_agent_1_profiler(suspect_name, evidence_data, ev_type, gemini_key):
     """
     
     if ev_type == "image":
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=[evidence_data, prompt]
-        )
+        image_buffer = BytesIO()
+        image_format = evidence_data.format or "PNG"
+        evidence_data.save(image_buffer, format=image_format)
+        image_base64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+        image_mime_type = Image.MIME.get(image_format.upper(), "image/png")
+        message_content = [
+            {"type": "text", "text": prompt},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{image_mime_type};base64,{image_base64}"
+                },
+            },
+        ]
     else:
-        response = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=f"{prompt}\n\nDocument Text:\n{evidence_data[:6000]}"
-        )
-        
-    cleaned = re.sub(r"```json|```", "", response.text).strip()
+        message_content = f"{prompt}\n\nDocument Text:\n{evidence_data[:6000]}"
+
+    response = client.chat.completions.create(
+        model="grok-4.7",
+        messages=[{"role": "user", "content": message_content}],
+    )
+    response_text = response.choices[0].message.content
+    if not response_text:
+        raise ValueError("xAI returned an empty evidence analysis.")
+
+    cleaned = re.sub(r"```json|```", "", response_text).strip()
     return json.loads(cleaned)
 
 # --- FALKOR DB GRAPH WRITER & CONTRADICTION ENGINE ---
@@ -1268,6 +1343,20 @@ with tab_ingest:
         up_col1, up_col2 = st.columns([1.3, 1], gap="large")
 
         with up_col1:
+            st.selectbox(
+                "Quick-load a hackathon demo case:",
+                options=[""] + list(SAMPLE_CASES),
+                format_func=lambda case_name: case_name or "Select a preloaded case",
+                key="sample_case_select",
+                on_change=load_sample_case,
+            )
+            st.caption("Selecting a case loads its evidence text and suspect into Agent 1.")
+            sample_evidence_text = st.text_area(
+                "Agent 1 evidence text:",
+                key="sample_evidence_text",
+                height=240,
+                placeholder="Select a sample case or paste evidence text here.",
+            )
             uploaded_file = st.file_uploader(
                 "Upload Forensic Evidence File (PNG, JPG, JPEG, PDF, TXT, MD):", 
                 type=["png", "jpg", "jpeg", "pdf", "txt", "md"],
@@ -1300,16 +1389,29 @@ with tab_ingest:
                 st.warning("⚠️ Please authenticate with your Falkor DB password in the top control strip first.")
             elif not suspect_name.strip():
                 st.warning("⚠️ Please enter a Target Suspect / Entity Identifier before ingesting.")
-            elif uploaded_file is not None:
-                data, ev_type = process_uploaded_evidence(uploaded_file)
-                with st.spinner(f"Agent 1 analyzing multi-modal evidence from '{uploaded_file.name}' for suspect '{suspect_name}'..."):
-                    claims = run_agent_1_profiler(suspect_name, data, ev_type, api_key)
-                    st.session_state.cypher_logs = ingest_to_falkordb(uploaded_file.name, suspect_name, claims)
-                    st.toast(f"✅ Extracted {len(claims)} claim(s) from '{uploaded_file.name}' into Falkor DB `{safe_case_id}`!", icon="🕵️‍♂️")
-                    st.success(f"Successfully mapped evidence from `{uploaded_file.name}` for `{suspect_name}` into Falkor DB `{safe_case_id}`!")
-                    st.rerun()
+            elif not xai_api_key:
+                st.warning("⚠️ Configure XAI_API_KEY in the environment or Streamlit secrets before analyzing evidence.")
+            elif sample_evidence_text.strip() or uploaded_file is not None:
+                if sample_evidence_text.strip():
+                    data, ev_type = sample_evidence_text.strip(), "text"
+                    selected_sample = st.session_state.get("sample_case_select")
+                    source_name = selected_sample or "Pasted_Evidence"
+                else:
+                    data, ev_type = process_uploaded_evidence(uploaded_file)
+                    source_name = uploaded_file.name
+
+                with st.spinner(f"Agent 1 analyzing evidence from '{source_name}' for suspect '{suspect_name}'..."):
+                    try:
+                        claims = run_agent_1_profiler(suspect_name, data, ev_type, xai_api_key)
+                    except (OpenAIError, json.JSONDecodeError, ValueError, OSError) as e:
+                        st.error(f"xAI evidence analysis failed: {e}")
+                    else:
+                        st.session_state.cypher_logs = ingest_to_falkordb(source_name, suspect_name, claims)
+                        st.toast(f"✅ Extracted {len(claims)} claim(s) from '{source_name}' into Falkor DB `{safe_case_id}`!", icon="🕵️‍♂️")
+                        st.success(f"Successfully mapped evidence from `{source_name}` for `{suspect_name}` into Falkor DB `{safe_case_id}`!")
+                        st.rerun()
             else:
-                st.warning("⚠️ Please select a forensic evidence file before initiating Agent 1 analysis.")
+                st.warning("⚠️ Select a sample case, enter evidence text, or upload a file before initiating Agent 1 analysis.")
 
 
 # ------------------------------------------------------------------------------
