@@ -12,12 +12,7 @@ from falkordb import FalkorDB
 from streamlit_agraph import agraph, Node, Edge, Config
 
 # --- PAGE CONFIGURATION (WIDE MATRIX LAYOUT) ---
-st.set_page_config(
-    page_title="ALIBI GRAPH // Cyber-Forensics & Lie Detector",
-    page_icon="🕵️‍♂️",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+st.set_page_config(page_title="ALIBI GRAPH // Cyber-Forensics & Lie Detector", page_icon="🔍", layout="wide")
 
 try:
     xai_api_key = os.getenv("XAI_API_KEY") or st.secrets.get("XAI_API_KEY", "")
