@@ -1039,12 +1039,12 @@ def run_agent_1_profiler(suspect_name, evidence_data, ev_type, gemini_key):
     
     if ev_type == "image":
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-3.8-flash",
             contents=[evidence_data, prompt]
         )
     else:
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-3.8-flash",
             contents=f"{prompt}\n\nDocument Text:\n{evidence_data[:6000]}"
         )
         
